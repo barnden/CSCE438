@@ -114,7 +114,7 @@ void handle_room(int socket)
 {
 }
 
-void handle_creation(int client, std::string room_name)
+void handle_creation(int client, std::string const& room_name)
 {
     auto buffer = std::make_unique<char[]>(MAX_DATA);
     auto status = Status::FAILURE_UNKNOWN;
@@ -135,6 +135,8 @@ void handle_creation(int client, std::string room_name)
         // but I dont think we're creating over 2^16 chatrooms anytime soon
         while (room_socket = get_socket(std::to_string(g_next_port), true) < 0)
             g_next_port++;
+
+        std::cout << "MAKING NEW SOCKET ON PORT: " << g_next_port << '\n';
 
         // New thread to handle the individual chat room
         auto room_thread = std::thread(handle_room, room_socket);
@@ -166,7 +168,7 @@ void handle_creation(int client, std::string room_name)
     send(client, buffer.get(), sizeof(message) + sizeof(status), 0);
 }
 
-void handle_deletion(int client, std::string room_name)
+void handle_deletion(int client, std::string const& room_name)
 {
     auto buffer = std::make_unique<char[]>(MAX_DATA);
 
@@ -180,7 +182,7 @@ void handle_deletion(int client, std::string room_name)
         status = Status::FAILURE_NOT_EXISTS;
         room_lock.unlock();
     } else {
-        auto room = g_chatrooms[room_name];
+        auto& room = g_chatrooms[room_name];
 
         // Copy DELETE message into buffer
         memcpy(buffer.get(), &message, sizeof(message));
@@ -213,7 +215,46 @@ void handle_deletion(int client, std::string room_name)
     send(client, buffer.get(), sizeof(message) + sizeof(status), 0);
 }
 
-void handle_join() { }
+void handle_join(int client, std::string const& room_name)
+{
+    auto buffer = std::make_unique<char[]>(MAX_DATA);
+
+    auto status = Status::FAILURE_UNKNOWN;
+    auto message = MessageType::DELETE;
+    auto message_length = sizeof(message) + sizeof(status);
+
+    auto room_lock = std::unique_lock<std::mutex>(g_room_mutex);
+
+    if (g_chatrooms.find(room_name) == g_chatrooms.end()) {
+        // If chatroom does not exist, send not exists message
+        status = Status::FAILURE_NOT_EXISTS;
+        room_lock.unlock();
+    } else {
+        // If chatroom does exist, we respond by sending the port number and number of connected clients in the chat room
+        // It is then up to the client to create a new connection over the specified port
+        auto& room = g_chatrooms[room_name];
+        auto port = room->m_port;
+        auto members = room->m_members;
+
+        room_lock.unlock();
+
+        auto cursor = buffer.get() + message_length;
+
+        memcpy(cursor, &port, sizeof(port));
+        memcpy(cursor + sizeof(port), &members, sizeof(members));
+
+        message_length += sizeof(port) + sizeof(members);
+
+        status = Status::SUCCESS;
+    }
+
+    // Only send the status of the operation
+    message = MessageType::RESPONSE;
+    memcpy(buffer.get(), &message, sizeof(message));
+    memcpy(buffer.get() + sizeof(message), &status, sizeof(status));
+
+    send(client, buffer.get(), message_length, 0);
+}
 
 void handle_client(int client)
 {
@@ -227,15 +268,20 @@ void handle_client(int client)
             break;
 
         auto type = reinterpret_cast<MessageType&>(*buffer.get());
+        auto room = std::string { buffer.get() + sizeof(MessageType) };
+
         switch (type) {
         case CREATE:
-            handle_creation(client, std::string { buffer.get() + sizeof(MessageType) });
+            std::cout << "creating room: " << room << '\n';
+            handle_creation(client, room);
             break;
         case DELETE:
-            handle_deletion(client, std::string { buffer.get() + sizeof(MessageType) });
+            std::cout << "deleting room: " << room << '\n';
+            handle_deletion(client, room);
             break;
         case JOIN:
-            handle_join();
+            std::cout << "joining room: " << room << '\n';
+            handle_join(client, room);
             break;
         default:
             // We should not get any other message type on the main client socket
