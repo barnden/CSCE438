@@ -15,9 +15,20 @@ This leaves us susceptible to the silly window syndrome if either the client or 
 
 We can disable Nagle's on a per socket basis by setting the `TCP_NODELAY` option via `setsockopt`.
 
-### Parallelization
-I decided to create a multithreadded server in order to handle requests from multiple clients.
+### Messages
+The client and server will communicate via messages, first by sending a `uint32_t` enum value:
+```
+enum MessageType { CREATE, DELETE, JOIN, LIST, MESSAGE, RESPONSE };
+```
 
-The server will generate a new thread for each client.
+After, the client/server will read from the socket up until some sentinel value.
 
-The messages and commands will be sent over the same socket.
+### Server
+
+#### Parallelization
+The server will have a main thread that listens to the specified port from the command line.
+
+For each client connection to the main socket, a new thread will be created to process that client's requests.
+
+#### Database
+To improve performance, I am using a `std::unordered_map` to get O(1) access.
