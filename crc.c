@@ -9,9 +9,12 @@
 #include <cstdlib>
 #include <cstring>
 
+#include <iostream>
+#include <memory>
 #include <string>
 
 #include "interface.h"
+#include "message.h"
 
 /*
  * TODO: IMPLEMENT BELOW THREE FUNCTIONS
@@ -116,39 +119,63 @@ int connect_to(const char* host, const int port)
  */
 struct Reply process_command(const int sockfd, char* command)
 {
-    // ------------------------------------------------------------
-    // GUIDE 1:
-    // In this function, you are supposed to parse a given command
-    // and create your own message in order to communicate with
-    // the server. Surely, you can use the input command without
-    // any changes if your server understand it. The given command
-    // will be one of the followings:
-    //
-    // CREATE <name>
-    // DELETE <name>
-    // JOIN <name>
-    // LIST
-    //
-    // -  "<name>" is a chatroom name that you want to create, delete,
-    // or join.
-    //
-    // - CREATE/DELETE/JOIN and "<name>" are separated by one space.
-    // ------------------------------------------------------------
+    auto buffer = std::make_unique<char[]>(MAX_DATA);
+    auto offset = 0;
+    auto message = MessageType::INVALID;
 
     if (!strncmp(command, "CREATE", 6)) {
-
+        message = CREATE;
+        offset = 7;
     } else if (!strncmp(command, "DELETE", 6)) {
-
+        message = DELETE;
+        offset = 7;
     } else if (!strncmp(command, "JOIN", 4)) {
-
+        message = JOIN;
+        offset = 5;
     } else if (!strncmp(command, "LIST", 4)) {
+        message = LIST;
+        offset = 4;
     }
 
-    // ------------------------------------------------------------
-    // GUIDE 2:
-    // After you create the message, you need to send it to the
-    // server and receive a result from the server.
-    // ------------------------------------------------------------
+    memcpy(buffer.get(), &message, sizeof(message));
+
+    // Offset is to ignore the command text and only pass the arguments to the server
+    strcpy(buffer.get() + sizeof(message), command + offset);
+
+    // Send the command to the server
+    send(sockfd, buffer.get(), sizeof(message) + strlen(command) - offset + 1, 0);
+
+    memset(buffer.get(), 0, MAX_DATA);
+
+    auto bytes = recv(sockfd, buffer.get(), MAX_DATA, 0);
+    auto reply = Reply {};
+    auto cursor = buffer.get();
+
+    // Verify that we have indeed received a RESPONSE message from the server
+    if (reinterpret_cast<MessageType&>(*cursor) != MessageType::RESPONSE) {
+        std::cerr << "expected response message type from server.\n";
+        exit(EXIT_FAILURE);
+    }
+
+    cursor += sizeof(MessageType);
+
+    reply.status = reinterpret_cast<Status&>(*cursor);
+
+    cursor += sizeof(Status);
+
+    auto data = uint32_t {};
+
+    if (message == JOIN) {
+        reply.port = *reinterpret_cast<decltype(reply.port)*>(cursor);
+        cursor += sizeof(reply.port);
+
+        reply.num_member = *reinterpret_cast<decltype(reply.num_member)*>(cursor);
+        cursor += sizeof(reply.num_member);
+
+        // std::cout << "PORT: " << reply.port << "\t NUMBER"
+    } else if (message == LIST) {
+        // TODO: Implement this
+    }
 
     // ------------------------------------------------------------
     // GUIDE 3:
@@ -192,11 +219,6 @@ struct Reply process_command(const int sockfd, char* command)
     // as "r1,r2,r3,"
     // ------------------------------------------------------------
 
-    // REMOVE below code and write your own Reply.
-    struct Reply reply;
-    reply.status = SUCCESS;
-    reply.num_member = 5;
-    reply.port = 1024;
     return reply;
 }
 
