@@ -1,0 +1,12 @@
+Standard: Cpp11
+BasedOnStyle: WebKit
+IndentWidth: 4
+NamespaceIndentation: Inner
+IndentPPDirectives: AfterHash
+AlignOperands: Align
+AlignConsecutiveMacros: true
+AlignAfterOpenBracket: Align
+BreakConstructorInitializers: BeforeComma
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: True
