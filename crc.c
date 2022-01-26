@@ -1,12 +1,13 @@
 #include <netdb.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include <string>
 
@@ -54,37 +55,30 @@ int main(int argc, char** argv)
  *
  * @parameter host    host address given by command line argument
  * @parameter port    port given by command line argument
- * 
+ *
  * @return socket fildescriptor
  */
 int connect_to(const char* host, const int port)
 {
-    // ------------------------------------------------------------
-    // GUIDE :
-    // In this function, you are suppose to connect to the server.
-    // After connection is established, you are ready to send or
-    // receive the message to/from the server.
-    //
-    // Finally, you should return the socket fildescriptor
-    // so that other functions such as "process_command" can use it
-    // ------------------------------------------------------------
+    // Establish a TCP connection with the server
+    // No need to memset hints to 0 because it's zero initialized in C++
+    auto hints = addrinfo {};
 
-    auto* result = static_cast<addrinfo*>(nullptr);
-    auto* rp = static_cast<addrinfo*>(nullptr);
-    auto hints = addrinfo {
-        .ai_flags = 0,
-        .ai_family = AF_UNSPEC,
-        .ai_socktype = SOCK_DGRAM,
-        .ai_protocol = 0
-    };
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
 
-    if (!getaddrinfo(host, std::string { port }.c_str(), &hints, &result)) {
+    auto* result = std::add_pointer_t<addrinfo> {};
+
+    // Attempt to resolve host
+    if (getaddrinfo(host, std::to_string(port).c_str(), &hints, &result) < 0) {
         perror("getaddrinfo()");
         exit(EXIT_FAILURE);
     }
 
+    // Attempt to create a socket
     auto socketfd = -1;
-
+    auto* rp = std::add_pointer_t<addrinfo> {};
     for (rp = result; rp != NULL; rp = rp->ai_next) {
         socketfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
 
@@ -97,24 +91,28 @@ int connect_to(const char* host, const int port)
         close(socketfd);
     }
 
+    // Result struct no longer needed
     freeaddrinfo(result);
 
-    if (rp == NULL) {
-        // No connection could be established
+    // No connection could be established if rp is NULL
+    if (rp == NULL)
         exit(EXIT_FAILURE);
-    }
+
+    // Disable Nagle's algorithm (see design document)
+    auto unused = 1;
+    setsockopt(socketfd, IPPROTO_TCP, TCP_NODELAY, &unused, sizeof(decltype(TCP_NODELAY)));
 
     return socketfd;
 }
 
-/* 
+/*
  * Send an input command to the server and return the result
  *
  * @parameter sockfd   socket file descriptor to commnunicate
  *                     with the server
  * @parameter command  command will be sent to the server
  *
- * @return    Reply    
+ * @return    Reply
  */
 struct Reply process_command(const int sockfd, char* command)
 {
@@ -144,7 +142,6 @@ struct Reply process_command(const int sockfd, char* command)
     } else if (!strncmp(command, "JOIN", 4)) {
 
     } else if (!strncmp(command, "LIST", 4)) {
-
     }
 
     // ------------------------------------------------------------
@@ -203,9 +200,9 @@ struct Reply process_command(const int sockfd, char* command)
     return reply;
 }
 
-/* 
+/*
  * Get into the chat mode
- * 
+ *
  * @parameter host     host address
  * @parameter port     port
  */
@@ -217,6 +214,8 @@ void process_chatmode(const char* host, const int port)
     // to the server using host and port.
     // You may re-use the function "connect_to".
     // ------------------------------------------------------------
+
+    auto socketfd = connect_to(host, port);
 
     // ------------------------------------------------------------
     // GUIDE 2:
