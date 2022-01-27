@@ -11,7 +11,9 @@
 
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include "interface.h"
 #include "message.h"
@@ -148,6 +150,12 @@ struct Reply process_command(const int sockfd, char* command)
     memset(buffer.get(), 0, MAX_DATA);
 
     auto bytes = recv(sockfd, buffer.get(), MAX_DATA, 0);
+
+    if (bytes < 0) {
+        perror("recv()");
+        exit(EXIT_FAILURE);
+    }
+
     auto reply = Reply {};
     auto cursor = buffer.get();
 
@@ -175,49 +183,19 @@ struct Reply process_command(const int sockfd, char* command)
         // std::cout << "PORT: " << reply.port << "\t NUMBER"
     } else if (message == LIST) {
         // TODO: Implement this
+        // For the "LIST" command,
+        // You are suppose to copy the list of chatroom to the list_room
+        // variable. Each room name should be seperated by comma ','.
+        // For example, if given command is "LIST", the Reply variable
+        // will be set as following.
+        //
+        // Reply reply;
+        // reply.status = SUCCESS;
+        // strcpy(reply.list_room, list);
+        //
+        // "list" is a string that contains a list of chat rooms such
+        // as "r1,r2,r3,"
     }
-
-    // ------------------------------------------------------------
-    // GUIDE 3:
-    // Then, you should create a variable of Reply structure
-    // provided by the interface and initialize it according to
-    // the result.
-    //
-    // For example, if a given command is "JOIN room1"
-    // and the server successfully created the chatroom,
-    // the server will reply a message including information about
-    // success/failure, the number of members and port number.
-    // By using this information, you should set the Reply variable.
-    // the variable will be set as following:
-    //
-    // Reply reply;
-    // reply.status = SUCCESS;
-    // reply.num_member = number;
-    // reply.port = port;
-    //
-    // "number" and "port" variables are just an integer variable
-    // and can be initialized using the message fomr the server.
-    //
-    // For another example, if a given command is "CREATE room1"
-    // and the server failed to create the chatroom becuase it
-    // already exists, the Reply varible will be set as following:
-    //
-    // Reply reply;
-    // reply.status = FAILURE_ALREADY_EXISTS;
-    //
-    // For the "LIST" command,
-    // You are suppose to copy the list of chatroom to the list_room
-    // variable. Each room name should be seperated by comma ','.
-    // For example, if given command is "LIST", the Reply variable
-    // will be set as following.
-    //
-    // Reply reply;
-    // reply.status = SUCCESS;
-    // strcpy(reply.list_room, list);
-    //
-    // "list" is a string that contains a list of chat rooms such
-    // as "r1,r2,r3,"
-    // ------------------------------------------------------------
 
     return reply;
 }
@@ -230,35 +208,38 @@ struct Reply process_command(const int sockfd, char* command)
  */
 void process_chatmode(const char* host, const int port)
 {
-    // ------------------------------------------------------------
-    // GUIDE 1:
-    // In order to join the chatroom, you are supposed to connect
-    // to the server using host and port.
-    // You may re-use the function "connect_to".
-    // ------------------------------------------------------------
-
     auto socketfd = connect_to(host, port);
 
-    // ------------------------------------------------------------
-    // GUIDE 2:
-    // Once the client have been connected to the server, we need
-    // to get a message from the user and send it to server.
-    // At the same time, the client should wait for a message from
-    // the server.
-    // ------------------------------------------------------------
+    // We do not provide the user a method to return to command mode after entering chat mode
 
-    // ------------------------------------------------------------
-    // IMPORTANT NOTICE:
-    // 1. To get a message from a user, you should use a function
-    // "void get_message(char*, int);" in the interface.h file
-    //
-    // 2. To print the messages from other members, you should use
-    // the function "void display_message(char*)" in the interface.h
-    //
-    // 3. Once a user entered to one of chatrooms, there is no way
-    //    to command mode where the user  enter other commands
-    //    such as CREATE,DELETE,LIST.
-    //    Don't have to worry about this situation, and you can
-    //    terminate the client program by pressing CTRL-C (SIGINT)
-    // ------------------------------------------------------------
+    // Threads are overkill but I don't remember how to use epoll()
+    auto listener = std::thread([socketfd]() -> void {
+        auto buffer = std::make_unique<char[]>(BUFSIZ);
+
+        while (true) {
+            auto bytes = recv(socketfd, buffer.get(), BUFSIZ, 0);
+
+            if (bytes < 0) {
+                perror("recv()");
+                continue;
+            }
+
+            // If new message is shorter than previous message then we will start writing
+            // the previous message without setting the sentinel value.
+            buffer.get()[bytes] = '\0';
+
+            // Write received message into STDOUT, append new line, and flush buffer
+            std::cout << std::string { buffer.get() } << std::endl;
+        }
+    });
+
+    listener.detach();
+
+    while (true) {
+        // Handle blocking I/O from fgets in main client thread
+        auto buffer = std::make_unique<char[]>(BUFSIZ);
+        get_message(buffer.get(), BUFSIZ);
+
+        send(socketfd, buffer.get(), strlen(buffer.get()), 0);
+    }
 }
