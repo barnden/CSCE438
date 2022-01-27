@@ -180,6 +180,9 @@ struct Reply process_command(const int sockfd, char* command)
         reply.num_member = *reinterpret_cast<decltype(reply.num_member)*>(cursor);
         cursor += sizeof(reply.num_member);
 
+        // Chatmode irreversible; close sockfd
+        close(sockfd);
+
         // std::cout << "PORT: " << reply.port << "\t NUMBER"
     } else if (message == LIST) {
         // TODO: Implement this

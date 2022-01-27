@@ -325,7 +325,10 @@ void handle_client(int client)
             break;
         case JOIN:
             handle_join(client, room);
-            break;
+
+            // Chatmode is irreversible, do not accept any further commands; terminate loop
+            close(client);
+            return;
         default:
             // We should not get any other message type on the main client socket
             // Send to client a invalid command message
