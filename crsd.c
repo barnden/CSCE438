@@ -24,13 +24,15 @@ class Room {
 public:
     int m_port;
     int m_members;
+    int m_master_socket;
     std::thread m_handler;
     std::vector<int> m_sockets;
 
-    Room(std::thread&& handler, int port)
+    Room(std::thread&& handler, int port, int master)
         : m_handler(std::move(handler))
         , m_port(port)
         , m_members(0)
+        , m_master_socket(master)
     {
     }
 };
@@ -110,8 +112,55 @@ int get_socket(std::string port, bool no_fail = false)
     return socketfd;
 }
 
-void handle_room(int socket)
+void handle_chat(std::string const& room_name, int socket)
 {
+    auto buffer = std::make_unique<char[]>(BUFSIZ);
+    auto room_lock = std::unique_lock<std::mutex>(g_room_mutex, std::defer_lock);
+
+    while (true) {
+        auto bytes = recv(socket, buffer.get(), BUFSIZ, 0);
+
+        room_lock.lock();
+
+        // Broadcast buffer containing message to all clients
+        for (auto&& peer : g_chatrooms[room_name]->m_sockets)
+            if (peer != socket)
+                send(peer, buffer.get(), bytes, 0);
+
+        room_lock.unlock();
+
+        memset(buffer.get(), 0, BUFSIZ);
+    }
+}
+
+void handle_room(std::string room_name, int socket)
+{
+    auto client = sockaddr_storage {};
+    auto sin_size = socklen_t { sizeof(client) };
+
+    // Continuously accept client connections to the chatroom
+    while (true) {
+        auto client_socket = accept(socket, reinterpret_cast<sockaddr*>(&client), &sin_size);
+
+        if (client_socket < 0) {
+            // Acknowledge failure to accept; don't exit out
+            perror("accept()");
+            continue;
+        }
+
+        auto room_lock = std::unique_lock<std::mutex>(g_room_mutex);
+
+        auto& room = g_chatrooms[room_name];
+
+        room->m_sockets.push_back(client_socket);
+        room->m_members++;
+
+        room_lock.unlock();
+
+        // Spin up new thread to process chat messages
+        auto t = std::thread(handle_chat, room_name, client_socket);
+        t.detach();
+    }
 }
 
 void handle_creation(int client, std::string const& room_name)
@@ -133,22 +182,17 @@ void handle_creation(int client, std::string const& room_name)
 
         // Technically we should not be naively incrementing g_next_port in case of overflow,
         // but I dont think we're creating over 2^16 chatrooms anytime soon
-        while (room_socket = get_socket(std::to_string(g_next_port), true) < 0)
+        while ((room_socket = get_socket(std::to_string(g_next_port), true)) < 0)
             g_next_port++;
 
-        std::cout << "MAKING NEW SOCKET ON PORT: " << g_next_port << '\n';
-
         // New thread to handle the individual chat room
-        auto room_thread = std::thread(handle_room, room_socket);
+        auto room_thread = std::thread(handle_room, room_name, room_socket);
         room_thread.detach();
 
         // New room object
-        auto room = std::make_shared<Room>(std::move(room_thread), g_next_port);
+        auto room = std::make_shared<Room>(std::move(room_thread), g_next_port, room_socket);
 
         port_lock.unlock();
-
-        // The first element in each socket vector is always the room socket
-        room->m_sockets.push_back(room_socket);
 
         g_chatrooms[room_name] = std::move(room);
 
@@ -187,17 +231,19 @@ void handle_deletion(int client, std::string const& room_name)
         // Copy DELETE message into buffer
         memcpy(buffer.get(), &message, sizeof(message));
 
-        // Kill the chatroom thread
+        // Stop accepting new connections by killing chatroom thread
         room->m_handler.~thread();
 
-        for (auto it = room->m_sockets.begin(); it != room->m_sockets.end(); it++) {
+        for (auto&& socket : room->m_sockets) {
             // Send DELETE message to each client
-            if (it != room->m_sockets.begin())
-                send(*it, buffer.get(), MAX_DATA, 0);
+            send(socket, buffer.get(), sizeof(message), 0);
 
             // Close socket
-            close(*it);
+            close(socket);
         }
+
+        // Close master socket
+        close(room->m_master_socket);
 
         // Delete the chatroom
         g_chatrooms.erase(room_name);
@@ -272,15 +318,12 @@ void handle_client(int client)
 
         switch (type) {
         case CREATE:
-            std::cout << "creating room: " << room << '\n';
             handle_creation(client, room);
             break;
         case DELETE:
-            std::cout << "deleting room: " << room << '\n';
             handle_deletion(client, room);
             break;
         case JOIN:
-            std::cout << "joining room: " << room << '\n';
             handle_join(client, room);
             break;
         default:
@@ -305,11 +348,13 @@ int main(int argc, char** argv)
         return EXIT_FAILURE;
     }
 
+    // Bind to the port from command line arguments
     auto server = get_socket(std::string { argv[1] });
 
     auto client = sockaddr_storage {};
     auto sin_size = socklen_t { sizeof(client) };
 
+    // Continuously accept client connections
     while (true) {
         auto client_socket = accept(server, reinterpret_cast<sockaddr*>(&client), &sin_size);
 
@@ -318,6 +363,7 @@ int main(int argc, char** argv)
             return EXIT_FAILURE;
         }
 
+        // Handle communication with client asynchronously
         auto t = std::thread(handle_client, client_socket);
         t.detach();
     }
