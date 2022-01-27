@@ -302,6 +302,37 @@ void handle_join(int client, std::string const& room_name)
     send(client, buffer.get(), message_length, 0);
 }
 
+void handle_list(int client)
+{
+    // The string can be at most MAX_DATA, which is preceded by 2 32-bit integers (message type and status)
+    auto buffer = std::make_unique<char[]>(MAX_DATA + 64);
+
+    auto message = MessageType::RESPONSE;
+    auto status = Status::SUCCESS;
+
+    // Generate a string containing the names of all chatrooms, delimited with a comma
+    auto room_lock = std::unique_lock<std::mutex>(g_room_mutex);
+    auto rooms = std::string {};
+
+    // The expected output has a trailing comma
+    for (auto&& pair : g_chatrooms)
+        rooms += pair.first + ",";
+
+    room_lock.unlock();
+
+    // Copy relevant data into buffer
+    auto cursor = buffer.get();
+
+    memcpy(cursor, &message, sizeof(message));
+    memcpy(cursor += sizeof(message), &status, sizeof(status));
+    strcpy(cursor += sizeof(status), rooms.c_str());
+
+    // Ensure null-termination
+    buffer.get()[MAX_DATA + 63] = '\0';
+
+    send(client, buffer.get(), sizeof(message) + sizeof(status) + rooms.size(), 0);
+}
+
 void handle_client(int client)
 {
     auto buffer = std::make_unique<char[]>(MAX_DATA);
@@ -329,6 +360,9 @@ void handle_client(int client)
             // Chatmode is irreversible, do not accept any further commands; terminate loop
             close(client);
             return;
+        case LIST:
+            handle_list(client);
+            break;
         default:
             // We should not get any other message type on the main client socket
             // Send to client a invalid command message

@@ -121,20 +121,21 @@ int connect_to(const char* host, const int port)
  */
 struct Reply process_command(const int sockfd, char* command)
 {
-    auto buffer = std::make_unique<char[]>(MAX_DATA);
+    auto buffer = std::make_unique<char[]>(BUFSIZ);
     auto offset = 0;
     auto message = MessageType::INVALID;
 
-    if (!strncmp(command, "CREATE", 6)) {
+    // strncasecmp is non-POSIX
+    if (!strncasecmp(command, "CREATE", 6)) {
         message = CREATE;
         offset = 7;
-    } else if (!strncmp(command, "DELETE", 6)) {
+    } else if (!strncasecmp(command, "DELETE", 6)) {
         message = DELETE;
         offset = 7;
-    } else if (!strncmp(command, "JOIN", 4)) {
+    } else if (!strncasecmp(command, "JOIN", 4)) {
         message = JOIN;
         offset = 5;
-    } else if (!strncmp(command, "LIST", 4)) {
+    } else if (!strncasecmp(command, "LIST", 4)) {
         message = LIST;
         offset = 4;
     }
@@ -167,6 +168,7 @@ struct Reply process_command(const int sockfd, char* command)
 
     cursor += sizeof(MessageType);
 
+    // Extract status code from server
     reply.status = reinterpret_cast<Status&>(*cursor);
 
     cursor += sizeof(Status);
@@ -174,30 +176,23 @@ struct Reply process_command(const int sockfd, char* command)
     auto data = uint32_t {};
 
     if (message == JOIN) {
-        reply.port = *reinterpret_cast<decltype(reply.port)*>(cursor);
+        // Extract port and number of members from server response
+        reply.port = reinterpret_cast<decltype(reply.port)&>(*cursor);
         cursor += sizeof(reply.port);
 
-        reply.num_member = *reinterpret_cast<decltype(reply.num_member)*>(cursor);
+        reply.num_member = reinterpret_cast<decltype(reply.num_member)&>(*cursor);
         cursor += sizeof(reply.num_member);
 
         // Chatmode irreversible; close sockfd
         close(sockfd);
-
-        // std::cout << "PORT: " << reply.port << "\t NUMBER"
     } else if (message == LIST) {
-        // TODO: Implement this
-        // For the "LIST" command,
-        // You are suppose to copy the list of chatroom to the list_room
-        // variable. Each room name should be seperated by comma ','.
-        // For example, if given command is "LIST", the Reply variable
-        // will be set as following.
-        //
-        // Reply reply;
-        // reply.status = SUCCESS;
-        // strcpy(reply.list_room, list);
-        //
-        // "list" is a string that contains a list of chat rooms such
-        // as "r1,r2,r3,"
+        // After the status code, follows the list of chatroom names delimited by commas
+        auto list = std::string { cursor };
+
+        strcpy(reply.list_room, list.c_str());
+
+        // Terminate string properly
+        reply.list_room[MAX_DATA - 1] = '\0';
     }
 
     return reply;
