@@ -43,10 +43,12 @@ int main(int argc, char** argv)
         struct Reply reply = process_command(sockfd, command);
         display_reply(command, reply);
 
-        touppercase(command, strlen(command) - 1);
-        if (strncmp(command, "JOIN", 4) == 0) {
-            printf("Now you are in the chatmode\n");
-            process_chatmode(argv[1], reply.port);
+        if (reply.status == SUCCESS) {
+            touppercase(command, strlen(command) - 1);
+            if (strncmp(command, "JOIN", 4) == 0) {
+                printf("Now you are in the chatmode\n");
+                process_chatmode(argv[1], reply.port);
+            }
         }
 
         close(sockfd);
@@ -189,6 +191,9 @@ struct Reply process_command(const int sockfd, char* command)
         // After the status code, follows the list of chatroom names delimited by commas
         auto list = std::string { cursor };
 
+        if (!list.size())
+            list = "empty";
+
         strcpy(reply.list_room, list.c_str());
 
         // Terminate string properly
@@ -227,7 +232,7 @@ void process_chatmode(const char* host, const int port)
             buffer.get()[bytes] = '\0';
 
             // Write received message into STDOUT, append new line, and flush buffer
-            std::cout << std::string { buffer.get() } << std::endl;
+            std::cout << "> " << std::string { buffer.get() } << std::endl;
         }
     });
 
