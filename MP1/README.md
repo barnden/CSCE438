@@ -6,21 +6,18 @@ C/C++ chat room client and server.
 For MP1, I am aiming for a high throughput chat application.
 
 ### Protocol
-TCP is used as in a chat application, minimization of data loss and preservation of the order is important, despite the overhead from the SYN/ACK and FIN/ACK messages.
+Despite the overhead from SYN/ACK and FIN/ACK from TCP; I chose TCP instead of UDP as I did not wish to implement my own system to deal with packet loss and arrival order.
 
-On the topic of TCP, I hope to improve message throughput by modifing the socket options via `setsockopt()`.
-One possible optimization is to set the `TCP_NODELAY` option on a per socket basis to disable Nagle's algorithm.
+On the topic of TCP, I hope to improve message throughput by modifying the socket options via `setsockopt()`.
+There are two optimizations on opposite extremes: `TCP_NODELAY` and `TCP_CORK`.
 
-TCP over IPv4 has a 40-byte header, which leads me to the two (strong) assumptions:
-1. the size of commands and chat messages over this program will never be much greater than the header size,
-2. our connections between the client and server will always have adequate bandwidth.
+With `TCP_NODELAY`, we can immediately send out packets without waiting for Nagle's algorithm to accumulate them into a buffer.
+I suspect that `TCP_NODELAY` will improve application responsiveness, as our payload will never be much greater than the headers on each TCP packet (40 bytes for IPv4).
+On the flip side, this leaves us susceptible to the silly window syndrome if our server/client processes requests too slowly, or congestion collapse if our connection isn't good enough.
 
-From assumption 1, we can take for granted that most data communicated between the client and server will be transferred in tinygrams; so it stands to reason that disabling Nagle's algorithm will improve our performance.
-
-On the flip side, this leaves us susceptible to the following:
-1. silly window syndrome if either the client or server processes requests too slowly; however, I believe this to be a nonissue due to the simplicity of the program and parallelization.
-2. congestion collapse; from assumption 2: a nonissue.
-
+While `TCP_CORK` does the other extreme by accumulating as many tinygrams into one packet within a 200ms window.
+We could argue that a chat application need not be low latency; the only thing that should matter is that messages are transmitted, not their arrival time.
+By aggressively buffering the tinygrams, we reduce additional overhead from TCP, as we transmit data when the buffer is filled not when we receive acknowledgement from the previous packet.
 
 ### Client-Server Communication
 
@@ -60,3 +57,26 @@ When a client attempts to connect to the chatroom yet another thread is spawned,
 As there is no method for a user to exit chatmode, we can also close the initial command socket.
 #### Database
 To improve performance, I am using a `std::unordered_map` to get O(1) access.
+
+## Performance
+After completing MP1, I sought to see if I was correct in assuming that either `TCP_CORK` or `TCP_NODELAY` had any measurable impact on throughput.
+
+### Methodology
+The `crc` and `crsd` binaries were compiled using the `-O3` flag against C++17 on gcc 11.1.
+
+To measure the throughput, I did the following:
+1. Create a server on using `./crsd 8080`
+2. Join from a client using `./crc localhost 8080`, and manually inputting `create r1`.
+3. Execute `yes "join r1" | ./crc localhost 8080`
+    - The `yes` command will output to STDOUT `join r1` repeatedly (on my system, about 6.6 GiB/s)
+4. Execute `echo "join r1" | ./crc localhost 8080 | pv >/dev/null`
+    - The echo will pipe into `crc`, making it join chatroom `r1`.
+    - From step 3, a client will be transmitting many `join r1` chat messages a second, this is output to this client's STDOUT.
+    - This client's STDOUT is redirected into `pv` which will measure the throughput of the chat application.
+### Benchmarks
+
+| Default Socket Settings | `TCP_NODELAY` | `TCP_CORK` |
+| - | - | - |
+| 17.2 MiB/s | 5.82 MiB/s | 26.7 MiB/s |
+
+As we see, `TCP_CORK` was able to attain the highest throughput.
