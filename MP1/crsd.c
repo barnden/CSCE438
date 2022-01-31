@@ -13,6 +13,7 @@
 #include <cstring>
 
 #include <algorithm>
+#include <deque>
 #include <iostream>
 #include <memory>
 #include <mutex>
@@ -143,24 +144,30 @@ public:
 // In memory "database" of chat rooms
 auto g_chatrooms = std::unordered_map<std::string, std::unique_ptr<Room>>();
 
-// handle_chat is a very hot function, use GNU FLATTEN extension to aggressively inline
-__attribute__((flatten)) void handle_chat(std::unique_ptr<char[]>& buffer, std::string const& room_name, int socket)
+__attribute__((flatten)) void handle_chat_in(
+    std::unique_ptr<char[]>& buffer,
+    std::mutex& queue_mutex,
+    std::deque<std::string>& queue,
+    std::string const& room_name,
+    int socket)
 {
-    auto room_lock = std::unique_lock<std::mutex>(g_room_mutex);
+    auto room_lock = std::unique_lock<std::mutex>(g_room_mutex, std::defer_lock);
 
     errno = 0;
     auto bytes = recv(socket, buffer.get(), MAX_DATA, 0);
 
     if (bytes < 0) {
-        // This shouldn't happen because epoll_wait() notifies on EPOLLIN
-        // Howerver... EPOLET + EPOLLIN = we trigger before connection is established, resulting in EAGAIN; ignore by early return;
         if (errno == EAGAIN)
             return;
 
         if (errno == ECONNRESET || errno == EPIPE) {
+            room_lock.unlock();
+
             close(socket);
             auto& sockets = g_chatrooms[room_name]->m_sockets;
             sockets.erase(std::find(sockets.begin(), sockets.end(), socket));
+
+            room_lock.unlock();
             return;
         }
 
@@ -170,11 +177,39 @@ __attribute__((flatten)) void handle_chat(std::unique_ptr<char[]>& buffer, std::
 
     buffer[bytes] = '\0';
 
+    auto queue_lock = std::unique_lock<std::mutex>(queue_mutex);
+    auto str = std::string { buffer.get() };
+
+    queue.push_back(str);
+
+    queue_lock.unlock();
+}
+
+__attribute__((flatten)) void handle_chat_out(
+    std::unique_ptr<char[]>& buffer,
+    std::mutex& queue_mutex,
+    std::deque<std::string>& queue,
+    std::string const& room_name,
+    int socket)
+{
+    auto room_lock = std::unique_lock<std::mutex>(g_room_mutex);
+    auto queue_lock = std::unique_lock<std::mutex>(queue_mutex);
+
+    // Nothing to do.
+    if (!queue.size())
+        return;
+
+    // Copy string in queue to buffer
+    auto msglen = queue.front().size() + 1;
+    strcpy(buffer.get(), queue.front().c_str());
+
+    queue.pop_front();
+
+    queue_lock.unlock();
+
     // Multicast message to clients in the chatroom
     auto& room = g_chatrooms[room_name];
     auto peer = room->m_sockets.begin();
-
-    auto msglen = strlen(buffer.get()) + 1;
 
     while (peer != room->m_sockets.end()) {
         if (*peer == socket) {
@@ -215,7 +250,11 @@ __attribute__((flatten)) void handle_chat(std::unique_ptr<char[]>& buffer, std::
 
 void handle_room(std::string room_name, int socket)
 {
-    auto buffer = std::make_unique<char[]>(BUFSIZ);
+    auto buffer_in = std::make_unique<char[]>(BUFSIZ);
+    auto buffer_out = std::make_unique<char[]>(BUFSIZ);
+    auto queue = std::deque<std::string>();
+    auto queue_mutex = std::mutex {};
+
     auto room_lock = std::unique_lock<std::mutex>(g_room_mutex, std::defer_lock);
 
     auto ev = epoll_event {};
@@ -257,8 +296,11 @@ void handle_room(std::string room_name, int socket)
             auto fd = events[i].data.fd;
             if (fd != socket) {
                 // An existing client has sent a chat message for us to read
+                if (events[i].events & EPOLLIN)
+                    handle_chat_in(buffer_in, queue_mutex, queue, room_name, fd);
 
-                handle_chat(buffer, room_name, fd);
+                handle_chat_out(buffer_out, queue_mutex, queue, room_name, fd);
+
                 continue;
             }
 
