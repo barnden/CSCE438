@@ -1,8 +1,11 @@
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/epoll.h>
 #include <sys/time.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <cstdio>
@@ -107,7 +110,7 @@ int connect_to(const char* host, const int port)
 
     // Disable Nagle's algorithm (see design document)
     auto unused = 1;
-    setsockopt(socketfd, IPPROTO_TCP, TCP_NODELAY, &unused, sizeof(decltype(TCP_NODELAY)));
+    // setsockopt(socketfd, IPPROTO_TCP, TCP_CORK, &unused, sizeof(decltype(TCP_NODELAY)));
 
     return socketfd;
 }
@@ -184,9 +187,6 @@ struct Reply process_command(const int sockfd, char* command)
 
         reply.num_member = reinterpret_cast<decltype(reply.num_member)&>(*cursor);
         cursor += sizeof(reply.num_member);
-
-        // Chatmode irreversible; close sockfd
-        close(sockfd);
     } else if (message == LIST) {
         // After the status code, follows the list of chatroom names delimited by commas
         auto list = std::string { cursor };
@@ -209,40 +209,112 @@ struct Reply process_command(const int sockfd, char* command)
  * @parameter host     host address
  * @parameter port     port
  */
-void process_chatmode(const char* host, const int port)
+__attribute__((flatten)) void process_chatmode(const char* host, const int port)
 {
     auto socketfd = connect_to(host, port);
+    auto buffer = std::make_unique<char[]>(BUFSIZ);
 
-    // We do not provide the user a method to return to command mode after entering chat mode
+    // Make socket nonblocking to take advantage of EPOLLET
+    auto flags = fcntl(socketfd, F_GETFL, 0);
 
-    // Threads are overkill but I don't remember how to use epoll()
-    auto listener = std::thread([socketfd]() -> void {
-        auto buffer = std::make_unique<char[]>(BUFSIZ);
+    if (flags < 0) {
+        perror("fcntl(): F_GETFL");
+        exit(EXIT_FAILURE);
+    }
 
-        while (true) {
-            auto bytes = recv(socketfd, buffer.get(), BUFSIZ, 0);
+    if (fcntl(socketfd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("fcntl(): F_SETFL");
+        exit(EXIT_FAILURE);
+    }
 
-            if (bytes < 0) {
-                perror("recv()");
-                continue;
-            }
+    // Setup epoll
+    auto ev = epoll_event {};
+    auto events = std::make_unique<epoll_event[]>(MAX_DATA);
+    auto efd = epoll_create1(0);
 
-            // If new message is shorter than previous message then we will start writing
-            // the previous message without setting the sentinel value.
-            buffer.get()[bytes] = '\0';
+    if (efd < 0) {
+        perror("epoll_create1()");
+        exit(EXIT_FAILURE);
+    }
 
-            // Write received message into STDOUT, append new line, and flush buffer
-            std::cout << "> " << std::string { buffer.get() } << std::endl;
-        }
-    });
+    ev.events = EPOLLIN;
+    ev.data.fd = STDIN_FILENO;
 
-    listener.detach();
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, ev.data.fd, &ev) < 0) {
+        perror("epoll_ctl(): stdin");
+        exit(EXIT_FAILURE);
+    }
+
+    ev.events = EPOLLIN | EPOLLOUT | EPOLLET;
+    ev.data.fd = socketfd;
+
+    if (epoll_ctl(efd, EPOLL_CTL_ADD, ev.data.fd, &ev) < 0) {
+        perror("epoll_ctl(): socketfd");
+        exit(EXIT_FAILURE);
+    }
 
     while (true) {
-        // Handle blocking I/O from fgets in main client thread
-        auto buffer = std::make_unique<char[]>(BUFSIZ);
-        get_message(buffer.get(), BUFSIZ);
+        auto nfds = epoll_wait(efd, events.get(), MAX_DATA, -1);
 
-        send(socketfd, buffer.get(), strlen(buffer.get()), 0);
+        if (nfds < 0) {
+            perror("epoll_wait()");
+            exit(EXIT_FAILURE);
+        }
+
+        for (auto i = 0; i < nfds; i++) {
+            if (events[i].data.fd == STDIN_FILENO) {
+                get_message(buffer.get(), MAX_DATA);
+
+                auto sent = 0;
+                auto msglen = strlen(buffer.get()) + 1;
+
+                if (msglen == 1)
+                    continue;
+
+                while (sent < msglen) {
+                    auto bytes = 0;
+                    errno = 0;
+
+                    if (sent) {
+                        std::cerr << "FAIL: " << sent << '\t' << msglen << '\n';
+                    }
+
+                    if ((bytes = send(socketfd, buffer.get() + sent, msglen - sent, MSG_NOSIGNAL)) < 0) {
+                        // O_NONBLOCK + too many requests -> EAGAIN -> keep retrying until TCP buffer is available
+                        perror("send(): socketfd");
+                        if (errno == EAGAIN)
+                            continue;
+
+                        exit(EXIT_FAILURE);
+                    }
+
+                    sent += bytes;
+                }
+            } else {
+                errno = 0;
+                auto bytes = recv(socketfd, buffer.get(), MAX_DATA, 0);
+
+                if (bytes < 0) {
+                    // I don't think EAGAIN should ever happen here since epoll_wait() notifies us on EPOLLIN
+                    perror("recv(): socketfd");
+                    if (errno == EAGAIN)
+                        continue;
+
+                    exit(EXIT_FAILURE);
+                }
+
+                // Check if the first 32-bits match a DELETE message
+                // A user can never send this by accident in chat mode using just ASCII values
+                if (reinterpret_cast<uint32_t&>(*buffer.get()) == static_cast<uint32_t>(MessageType::DELETE)) {
+                    close(socketfd);
+                    close(efd);
+                    return;
+                }
+
+                buffer[bytes] = '\0';
+
+                std::cout << "> " << buffer.get() << '\n';
+            }
+        }
     }
 }
