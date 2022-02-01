@@ -125,6 +125,8 @@ struct Reply process_command(const int sockfd, char* command)
     auto message = MessageType::INVALID;
 
     // strncasecmp is non-POSIX
+    // Compare ignore case the string to known command keywords
+    // Offset assumes a space after these commands
     if (!strncasecmp(command, "CREATE", 6)) {
         message = CREATE;
         offset = 7;
@@ -242,8 +244,9 @@ __attribute__((flatten)) void process_chatmode(const char* host, const int port)
             // the previous message without setting the sentinel value.
             buffer.get()[bytes] = '\0';
 
-            // Write received message into STDOUT, append new line, and flush buffer
-            std::cout << "> " << std::string { buffer.get() } << std::endl;
+            // Write received message into STDOUT
+            display_message(buffer.get());
+            std::cout << '\n';
         }
     });
 
@@ -262,6 +265,7 @@ __attribute__((flatten)) void process_chatmode(const char* host, const int port)
     };
 
     while (true) {
+        // select() setup code
         auto fds = fd_set {};
 
         FD_ZERO(&fds);
@@ -275,6 +279,7 @@ __attribute__((flatten)) void process_chatmode(const char* host, const int port)
         }
 
         if (ret) {
+            // Get message using fgets()
             get_message(buffer.get(), BUFSIZ);
 
             send(socketfd, buffer.get(), strlen(buffer.get()), 0);
