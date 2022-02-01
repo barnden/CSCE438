@@ -156,15 +156,15 @@ __attribute__((flatten)) void handle_chat(std::string const& room_name, int sock
         room_lock.lock();
 
         // Multicast message to connected clients
-        if (g_chatrooms.find(room_name) == g_chatrooms.end()) {
-            // Room has been deleted?
+        if (g_chatrooms.find(room_name) == g_chatrooms.end())
             return;
-        }
 
+        // Iterators are cool ;)
         auto& room = g_chatrooms[room_name];
         auto peer = room->m_sockets.begin();
 
         while (peer != room->m_sockets.end()) {
+            // Multicast message by iterating through connected clients
             if (*peer == socket) {
                 peer++;
                 continue;
@@ -172,6 +172,7 @@ __attribute__((flatten)) void handle_chat(std::string const& room_name, int sock
 
             if (send(*peer, buffer.get(), bytes, 0) < 0) {
                 if (errno == ECONNRESET || errno == EPIPE) {
+                    // Client closed connection, delete from vec and continue
                     close(*peer);
                     room->m_members--;
                     peer = room->m_sockets.erase(peer);
@@ -206,6 +207,7 @@ void handle_room(std::string room_name, int socket)
             continue;
         }
 
+        // Update room with new socket and member count
         auto room_lock = std::unique_lock<std::mutex>(g_room_mutex);
 
         auto& room = g_chatrooms[room_name];
@@ -233,9 +235,8 @@ void handle_creation(int client, std::string const& room_name)
         status = Status::FAILURE_ALREADY_EXISTS;
         room_lock.unlock();
     } else {
+        // Room does not exist; create it.
         g_chatrooms[room_name] = std::make_unique<Room>(room_name);
-
-        // Done with g_chatrooms
         room_lock.unlock();
 
         status = Status::SUCCESS;
@@ -275,13 +276,14 @@ void handle_deletion(int client, std::string const& room_name)
         room->m_handler.~thread();
 
         for (auto&& peer : room->m_sockets) {
-            // Send DELETE message to each client
+            // Send DELETE message to all connected clients
             if (send(peer, buffer.get(), sizeof(message) + 1, 0) < 0) {
-                perror("send(): deletion");
+                if (errno != ECONNRESET || errno != EPIPE)
+                    perror("send(): deletion");
+
                 continue;
             }
 
-            // Close socket
             close(peer);
         }
 
@@ -402,7 +404,7 @@ void handle_client(int client)
             break;
         default:
             // We should not get any other message type on the main client socket
-            // Send to client a invalid command message
+            // Send to client an invalid command message
 
             auto status = Status::FAILURE_INVALID;
 
