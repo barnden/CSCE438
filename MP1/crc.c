@@ -1,6 +1,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <sys/select.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -105,10 +106,6 @@ int connect_to(const char* host, const int port)
     if (rp == NULL)
         exit(EXIT_FAILURE);
 
-    // Disable Nagle's algorithm (see design document)
-    auto unused = 1;
-    setsockopt(socketfd, IPPROTO_TCP, TCP_NODELAY, &unused, sizeof(decltype(TCP_NODELAY)));
-
     return socketfd;
 }
 
@@ -184,9 +181,6 @@ struct Reply process_command(const int sockfd, char* command)
 
         reply.num_member = reinterpret_cast<decltype(reply.num_member)&>(*cursor);
         cursor += sizeof(reply.num_member);
-
-        // Chatmode irreversible; close sockfd
-        close(sockfd);
     } else if (message == LIST) {
         // After the status code, follows the list of chatroom names delimited by commas
         auto list = std::string { cursor };
@@ -209,22 +203,39 @@ struct Reply process_command(const int sockfd, char* command)
  * @parameter host     host address
  * @parameter port     port
  */
-void process_chatmode(const char* host, const int port)
+__attribute__((flatten)) void process_chatmode(const char* host, const int port)
 {
     auto socketfd = connect_to(host, port);
+    auto kill = bool {};
 
-    // We do not provide the user a method to return to command mode after entering chat mode
+    // To improve throughput (but not latency) aggressively buffer packets
+    auto unused = 1;
+    setsockopt(socketfd, IPPROTO_TCP, TCP_CORK, &unused, sizeof(decltype(TCP_NODELAY)));
 
     // Threads are overkill but I don't remember how to use epoll()
-    auto listener = std::thread([socketfd]() -> void {
+    auto listener = std::thread([socketfd, &kill]() -> void {
         auto buffer = std::make_unique<char[]>(BUFSIZ);
 
         while (true) {
             auto bytes = recv(socketfd, buffer.get(), BUFSIZ, 0);
 
             if (bytes < 0) {
+                if (errno == ECONNRESET || errno == EPIPE) {
+                    // Chatroom closed or server died.
+                    close(socketfd);
+                    kill = true;
+                    return;
+                }
                 perror("recv()");
                 continue;
+            }
+
+            // Check if first 32-bits match DELETE message
+            if (reinterpret_cast<uint32_t&>(*buffer.get()) == static_cast<uint32_t>(MessageType::DELETE)) {
+                // Close socket and return to command mode if so
+                close(socketfd);
+                kill = true;
+                return;
             }
 
             // If new message is shorter than previous message then we will start writing
@@ -238,11 +249,38 @@ void process_chatmode(const char* host, const int port)
 
     listener.detach();
 
-    while (true) {
-        // Handle blocking I/O from fgets in main client thread
-        auto buffer = std::make_unique<char[]>(BUFSIZ);
-        get_message(buffer.get(), BUFSIZ);
+    auto buffer = std::make_unique<char[]>(BUFSIZ);
 
-        send(socketfd, buffer.get(), strlen(buffer.get()), 0);
+    // Don't immediately fgets() since it blocks entire thread; if a DELETE message is sent while we are blocked
+    // the thread won't terminate until after the user sends a new line.
+
+    // We use select() with a 100ms timeout to detect input, so that if kill is set, we terminate thread as
+    // quickly as possible, otherwise we check for input and fgets() if data is available.
+    auto tv = timeval {
+        .tv_sec = 0,
+        .tv_usec = 1'000
+    };
+
+    while (true) {
+        auto fds = fd_set {};
+
+        FD_ZERO(&fds);
+        FD_SET(STDIN_FILENO, &fds);
+
+        auto ret = select(1, &fds, NULL, NULL, &tv);
+
+        if (ret < 0) {
+            perror("select()");
+            return;
+        }
+
+        if (ret) {
+            get_message(buffer.get(), BUFSIZ);
+
+            send(socketfd, buffer.get(), strlen(buffer.get()), 0);
+        }
+
+        if (kill)
+            return;
     }
 }

@@ -20,25 +20,8 @@
 #include "interface.h"
 #include "message.h"
 
-class Room {
-public:
-    int m_port;
-    int m_members;
-    int m_master_socket;
-    std::thread m_handler;
-    std::vector<int> m_sockets;
-
-    Room(std::thread&& handler, int port, int master)
-        : m_handler(std::move(handler))
-        , m_port(port)
-        , m_members(0)
-        , m_master_socket(master)
-    {
-    }
-};
-
-// In memory "database" of chat rooms
-auto g_chatrooms = std::unordered_map<std::string, std::shared_ptr<Room>>();
+void handle_room(std::string room_name, int socket);
+int get_socket(std::string port, bool no_fail);
 
 // Ports 1024 - 65534 are not restricted to superuser
 // Keep track of the next port number that we have not attempted to use
@@ -49,6 +32,47 @@ auto g_port_mutex = std::mutex {};
 
 // Mutex associated with g_chatrooms
 auto g_room_mutex = std::mutex {};
+
+class Room {
+public:
+    int m_port;
+    int m_members;
+    int m_socket;
+    std::thread m_handler;
+    std::vector<int> m_sockets;
+
+    Room(std::string const& room_name)
+        : m_members(0)
+        , m_socket(0)
+    {
+        // The room mutex should be locked before entering this constructor.
+
+        auto port_lock = std::unique_lock<std::mutex>(g_port_mutex);
+
+        // Keep trying to open a socket for the chatroom on g_next_port
+        // Technically we should not be naively incrementing g_next_port in case of overflow,
+        // but I dont think we're creating over 2^16 chatrooms anytime soon
+        while ((m_socket = get_socket(std::to_string(g_next_port), true)) < 0)
+            g_next_port++;
+
+        m_port = g_next_port;
+
+        port_lock.unlock();
+
+        // New thread to handle the individual chat room
+        m_handler = std::thread(handle_room, room_name, m_socket);
+        m_handler.detach();
+    }
+
+    ~Room()
+    {
+        // Close socket
+        close(m_socket);
+    }
+};
+
+// In memory "database" of chat rooms
+auto g_chatrooms = std::unordered_map<std::string, std::unique_ptr<Room>>();
 
 /*
  * Create a socket to listen to on a given port
@@ -93,10 +117,8 @@ int get_socket(std::string port, bool no_fail = false)
         exit(EXIT_FAILURE);
     }
 
-    // Disable Nagle's algorithm
-    // TODO: See if this is actually something we want to do on this specific socket
     auto unused = 1;
-    setsockopt(socketfd, IPPROTO_TCP, TCP_NODELAY, &unused, sizeof(decltype(TCP_NODELAY)));
+    setsockopt(socketfd, IPPROTO_TCP, TCP_CORK, &unused, sizeof(decltype(TCP_NODELAY)));
 
     // Result struct no longer needed
     freeaddrinfo(result);
@@ -112,7 +134,8 @@ int get_socket(std::string port, bool no_fail = false)
     return socketfd;
 }
 
-void handle_chat(std::string const& room_name, int socket)
+// handle_chat is a very hot function, we can aggresively inline with flatten
+__attribute__((flatten)) void handle_chat(std::string const& room_name, int socket)
 {
     auto buffer = std::make_unique<char[]>(BUFSIZ);
     auto room_lock = std::unique_lock<std::mutex>(g_room_mutex, std::defer_lock);
@@ -120,12 +143,47 @@ void handle_chat(std::string const& room_name, int socket)
     while (true) {
         auto bytes = recv(socket, buffer.get(), BUFSIZ, 0);
 
+        if (bytes < 0) {
+            if (errno == ECONNRESET || errno == EPIPE) {
+                close(socket);
+                return;
+            }
+
+            perror("recv(): socket");
+            return;
+        }
+
         room_lock.lock();
 
-        // Broadcast buffer containing message to all clients
-        for (auto&& peer : g_chatrooms[room_name]->m_sockets)
-            if (peer != socket)
-                send(peer, buffer.get(), bytes, 0);
+        // Multicast message to connected clients
+        if (g_chatrooms.find(room_name) == g_chatrooms.end()) {
+            // Room has been deleted?
+            return;
+        }
+
+        auto& room = g_chatrooms[room_name];
+        auto peer = room->m_sockets.begin();
+
+        while (peer != room->m_sockets.end()) {
+            if (*peer == socket) {
+                peer++;
+                continue;
+            }
+
+            if (send(*peer, buffer.get(), bytes, 0) < 0) {
+                if (errno == ECONNRESET || errno == EPIPE) {
+                    close(*peer);
+                    room->m_members--;
+                    peer = room->m_sockets.erase(peer);
+                    continue;
+                }
+
+                perror("send(): chat");
+                exit(errno);
+            }
+
+            peer++;
+        }
 
         room_lock.unlock();
 
@@ -175,26 +233,7 @@ void handle_creation(int client, std::string const& room_name)
         status = Status::FAILURE_ALREADY_EXISTS;
         room_lock.unlock();
     } else {
-        auto port_lock = std::unique_lock<std::mutex>(g_port_mutex);
-
-        // Keep trying to open a socket for the chatroom on g_next_port
-        auto room_socket = 0;
-
-        // Technically we should not be naively incrementing g_next_port in case of overflow,
-        // but I dont think we're creating over 2^16 chatrooms anytime soon
-        while ((room_socket = get_socket(std::to_string(g_next_port), true)) < 0)
-            g_next_port++;
-
-        // New thread to handle the individual chat room
-        auto room_thread = std::thread(handle_room, room_name, room_socket);
-        room_thread.detach();
-
-        // New room object
-        auto room = std::make_shared<Room>(std::move(room_thread), g_next_port, room_socket);
-
-        port_lock.unlock();
-
-        g_chatrooms[room_name] = std::move(room);
+        g_chatrooms[room_name] = std::make_unique<Room>(room_name);
 
         // Done with g_chatrooms
         room_lock.unlock();
@@ -230,20 +269,21 @@ void handle_deletion(int client, std::string const& room_name)
 
         // Copy DELETE message into buffer
         memcpy(buffer.get(), &message, sizeof(message));
+        buffer[sizeof(message)] = '\0';
 
         // Stop accepting new connections by killing chatroom thread
         room->m_handler.~thread();
 
-        for (auto&& socket : room->m_sockets) {
+        for (auto&& peer : room->m_sockets) {
             // Send DELETE message to each client
-            send(socket, buffer.get(), sizeof(message), 0);
+            if (send(peer, buffer.get(), sizeof(message) + 1, 0) < 0) {
+                perror("send(): deletion");
+                continue;
+            }
 
             // Close socket
-            close(socket);
+            close(peer);
         }
-
-        // Close master socket
-        close(room->m_master_socket);
 
         // Delete the chatroom
         g_chatrooms.erase(room_name);
@@ -328,7 +368,7 @@ void handle_list(int client)
     strcpy(cursor += sizeof(status), rooms.c_str());
 
     // Ensure null-termination
-    buffer.get()[MAX_DATA + 63] = '\0';
+    buffer[MAX_DATA + 63] = '\0';
 
     send(client, buffer.get(), sizeof(message) + sizeof(status) + rooms.size(), 0);
 }
@@ -356,9 +396,6 @@ void handle_client(int client)
             break;
         case JOIN:
             handle_join(client, room);
-
-            // Chatmode is irreversible, do not accept any further commands; terminate loop
-            close(client);
             return;
         case LIST:
             handle_list(client);
