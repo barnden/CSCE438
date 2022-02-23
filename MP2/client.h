@@ -1,13 +1,12 @@
+#include <ctime>
+#include <grpc++/grpc++.h>
 #include <iostream>
 #include <string>
-#include <ctime>
 #include <vector>
-#include <grpc++/grpc++.h>
 
 #define MAX_DATA 256
 
-enum IStatus
-{
+enum IStatus {
     SUCCESS,
     FAILURE_ALREADY_EXISTS,
     FAILURE_NOT_EXISTS,
@@ -38,35 +37,32 @@ enum IStatus
  * This structure is not for communicating between server and client.
  * You need to design your own rules for the communication.
  */
-struct IReply
-{
+struct IReply {
     grpc::Status grpc_status;
     enum IStatus comm_status;
     std::vector<std::string> all_users;
     std::vector<std::string> following_users;
 };
 
-class IClient
-{
-    public:
-        void run_client() { run(); }
+class IClient {
+public:
+    void run_client() { run(); }
 
-    protected:
-        /*
-         * Pure virtual functions to be implemented by students
-         */
-        virtual int connectTo() = 0;
-        virtual IReply processCommand(std::string& cmd) = 0;
-        virtual void processTimeline() = 0;
+protected:
+    /*
+     * Pure virtual functions to be implemented by students
+     */
+    virtual int connectTo() = 0;
+    virtual IReply processCommand(std::string& cmd) = 0;
+    virtual void processTimeline() = 0;
 
-    private:
+private:
+    void run();
 
-        void run();
-
-        void displayTitle() const;
-        std::string getCommand() const;
-        void displayCommandReply(const std::string& comm, const IReply& reply) const;
-        void toUpperCase(std::string& str) const;
+    void displayTitle() const;
+    std::string getCommand() const;
+    void displayCommandReply(const std::string& comm, const IReply& reply) const;
+    void toUpperCase(std::string& str) const;
 };
 
 void IClient::run()
@@ -82,7 +78,7 @@ void IClient::run()
         IReply reply = processCommand(cmd);
         displayCommandReply(cmd, reply);
         if (reply.grpc_status.ok() && reply.comm_status == SUCCESS
-                && cmd == "TIMELINE") {
+            && cmd == "TIMELINE") {
             std::cout << "Now you are in the timeline" << std::endl;
             processTimeline();
         }
@@ -102,72 +98,72 @@ void IClient::displayTitle() const
 
 std::string IClient::getCommand() const
 {
-	std::string input;
-	while (1) {
-		std::cout << "Cmd> ";
-		std::getline(std::cin, input);
-		std::size_t index = input.find_first_of(" ");
-		if (index != std::string::npos) {
-			std::string cmd = input.substr(0, index);
-			toUpperCase(cmd);
-			if(input.length() == index+1){
-				std::cout << "Invalid Input -- No Arguments Given\n";
-				continue;
-			}
-			std::string argument = input.substr(index+1, (input.length()-index));
-			input = cmd + " " + argument;
-		} else {
-			toUpperCase(input);
-			if (input != "LIST" && input != "TIMELINE") {
-				std::cout << "Invalid Command\n";
-				continue;
-			}
-		}
-		break;
-	}
-	return input;
+    std::string input;
+    while (1) {
+        std::cout << "Cmd> ";
+        std::getline(std::cin, input);
+        std::size_t index = input.find_first_of(" ");
+        if (index != std::string::npos) {
+            std::string cmd = input.substr(0, index);
+            toUpperCase(cmd);
+            if (input.length() == index + 1) {
+                std::cout << "Invalid Input -- No Arguments Given\n";
+                continue;
+            }
+            std::string argument = input.substr(index + 1, (input.length() - index));
+            input = cmd + " " + argument;
+        } else {
+            toUpperCase(input);
+            if (input != "LIST" && input != "TIMELINE") {
+                std::cout << "Invalid Command\n";
+                continue;
+            }
+        }
+        break;
+    }
+    return input;
 }
 
 void IClient::displayCommandReply(const std::string& comm, const IReply& reply) const
 {
-	if (reply.grpc_status.ok()) {
-		switch (reply.comm_status) {
-			case SUCCESS:
-                std::cout << "Command completed successfully\n";
-				if (comm == "LIST") {
-					std::cout << "All users: ";
-                    for (std::string room : reply.all_users) {
-                        std::cout << room << ", ";
-                    }
-					std::cout << "\nFollowing users: ";
-                    for (std::string room : reply.following_users) {
-                        std::cout << room << ", ";
-                    }
-                    std::cout << std::endl;
-				}
-				break;
-			case FAILURE_ALREADY_EXISTS:
-                std::cout << "Input username already exists, command failed\n";
-				break;
-			case FAILURE_NOT_EXISTS:
-                std::cout << "Input username does not exists, command failed\n";
-				break;
-			case FAILURE_INVALID_USERNAME:
-                std::cout << "Command failed with invalid username\n";
-				break;
-			case FAILURE_INVALID:
-                std::cout << "Command failed with invalid command\n";
-				break;
-			case FAILURE_UNKNOWN:
-                std::cout << "Command failed with unknown reason\n";
-				break;
-			default:
-                std::cout << "Invalid status\n";
-				break;
-		}
-	} else {
-		std::cout << "grpc failed: " << reply.grpc_status.error_message() << std::endl;
-	}
+    if (reply.grpc_status.ok()) {
+        switch (reply.comm_status) {
+        case SUCCESS:
+            std::cout << "Command completed successfully\n";
+            if (comm == "LIST") {
+                std::cout << "All users: ";
+                for (std::string room : reply.all_users) {
+                    std::cout << room << ", ";
+                }
+                std::cout << "\nFollowers: ";
+                for (std::string room : reply.following_users) {
+                    std::cout << room << ", ";
+                }
+                std::cout << std::endl;
+            }
+            break;
+        case FAILURE_ALREADY_EXISTS:
+            std::cout << "Input username already exists, command failed\n";
+            break;
+        case FAILURE_NOT_EXISTS:
+            std::cout << "Input username does not exists, command failed\n";
+            break;
+        case FAILURE_INVALID_USERNAME:
+            std::cout << "Command failed with invalid username\n";
+            break;
+        case FAILURE_INVALID:
+            std::cout << "Command failed with invalid command\n";
+            break;
+        case FAILURE_UNKNOWN:
+            std::cout << "Command failed with unknown reason\n";
+            break;
+        default:
+            std::cout << "Invalid status\n";
+            break;
+        }
+    } else {
+        std::cout << "grpc failed: " << reply.grpc_status.error_message() << std::endl;
+    }
 }
 
 void IClient::toUpperCase(std::string& str) const
@@ -184,8 +180,9 @@ std::string getPostMessage()
 {
     char buf[MAX_DATA];
     while (1) {
-	    fgets(buf, MAX_DATA, stdin);
-	    if (buf[0] != '\n')  break;
+        fgets(buf, MAX_DATA, stdin);
+        if (buf[0] != '\n')
+            break;
     }
 
     std::string message(buf);
@@ -195,6 +192,6 @@ std::string getPostMessage()
 void displayPostMessage(const std::string& sender, const std::string& message, std::time_t& time)
 {
     std::string t_str(std::ctime(&time));
-    t_str[t_str.size()-1] = '\0';
+    t_str[t_str.size() - 1] = '\0';
     std::cout << sender << "(" << t_str << ") >> " << message << std::endl;
 }
