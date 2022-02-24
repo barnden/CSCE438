@@ -1,6 +1,8 @@
 #include "client.h"
+#include "sns.grpc.pb.h"
 #include <grpc++/grpc++.h>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <unistd.h>
 
@@ -28,11 +30,11 @@ private:
     // You can have an instance of the client stub
     // as a member variable.
     // std::unique_ptr<NameOfYourStubClass::Stub> stub_;
+    std::unique_ptr<csce438::SNSService::Stub> stub_;
 };
 
 int main(int argc, char** argv)
 {
-
     std::string hostname = "localhost";
     std::string username = "default";
     std::string port = "3010";
@@ -62,43 +64,25 @@ int main(int argc, char** argv)
 
 int Client::connectTo()
 {
-    // ------------------------------------------------------------
-    // In this function, you are supposed to create a stub so that
-    // you call service methods in the processCommand/porcessTimeline
-    // functions. That is, the stub should be accessible when you want
-    // to call any service methods in those functions.
-    // I recommend you to have the stub as
-    // a member variable in your own Client class.
-    // Please refer to gRpc tutorial how to create a stub.
-    // ------------------------------------------------------------
+    auto channel = grpc::CreateChannel(hostname + ':' + port, grpc::InsecureChannelCredentials());
+    stub_ = std::move(csce438::SNSService::NewStub(channel));
 
-    return 1; // return 1 if success, otherwise return -1
+    auto reply = csce438::Reply {};
+    auto context = grpc::ClientContext {};
+    auto request = csce438::Request {};
+
+    request.set_username(username);
+
+    auto status = stub_->Login(&context, request, &reply);
+
+    if (status.ok())
+        return 1;
+
+    return -1;
 }
 
 IReply Client::processCommand(std::string& input)
 {
-    // ------------------------------------------------------------
-    // GUIDE 1:
-    // In this function, you are supposed to parse the given input
-    // command and create your own message so that you call an
-    // appropriate service method. The input command will be one
-    // of the followings:
-    //
-    // FOLLOW <username>
-    // UNFOLLOW <username>
-    // LIST
-    // TIMELINE
-    //
-    // ------------------------------------------------------------
-
-    // ------------------------------------------------------------
-    // GUIDE 2:
-    // Then, you should create a variable of IReply structure
-    // provided by the client.h and initialize it according to
-    // the result. Finally you can finish this function by returning
-    // the IReply.
-    // ------------------------------------------------------------
-
     // ------------------------------------------------------------
     // HINT: How to set the IReply?
     // Suppose you have "Follow" service method for FOLLOW command,
@@ -122,8 +106,42 @@ IReply Client::processCommand(std::string& input)
     // "following_users" member variable of IReply.
     // ------------------------------------------------------------
 
-    IReply ire;
-    return ire;
+    auto reply = IReply {};
+
+    // Common to all rpc
+    auto context = grpc::ClientContext {};
+    auto status = grpc::Status {};
+    auto request = csce438::Request {};
+    auto response = csce438::Reply {};
+    request.set_allocated_username(&username);
+
+    if (input.rfind("FOLLOW", 0) == 0) {
+        status = stub_->Follow(&context, request, &response);
+    } else if (input.rfind("UNFOLLOW", 0) == 0) {
+        status = stub_->UnFollow(&context, request, &response);
+    } else if (input.rfind("LIST", 0) == 0) {
+        status = stub_->List(&context, request, &response);
+        reply.all_users = std::vector<std::string> {};
+        reply.following_users = std::vector<std::string> {};
+    } else if (input.rfind("TIMELINE", 0) == 0) {
+        auto timeline = stub_->Timeline(&context);
+        auto timeline_message = csce438::Message {};
+
+        while(timeline->Read(&timeline_message)) {
+            auto username = timeline_message.username();
+            auto message = timeline_message.msg();
+            auto timestamp = timeline_message.timestamp();
+        }
+    }
+
+    reply.grpc_status = status;
+    if (status.ok()) {
+        reply.comm_status = SUCCESS;
+    } else {
+        reply.comm_status = FAILURE_NOT_EXISTS;
+    }
+
+    return reply;
 }
 
 void Client::processTimeline()
