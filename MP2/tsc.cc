@@ -114,33 +114,42 @@ IReply Client::processCommand(std::string& input)
     auto request = csce438::Request {};
     auto response = csce438::Reply {};
     request.set_allocated_username(&username);
+    reply.comm_status = SUCCESS;
 
     if (input.rfind("FOLLOW", 0) == 0) {
         status = stub_->Follow(&context, request, &response);
+
+        if (!status.ok())
+            reply.comm_status = FAILURE_INVALID_USERNAME;
     } else if (input.rfind("UNFOLLOW", 0) == 0) {
         status = stub_->UnFollow(&context, request, &response);
+
+        if (!status.ok())
+            reply.comm_status = FAILURE_INVALID;
     } else if (input.rfind("LIST", 0) == 0) {
         status = stub_->List(&context, request, &response);
-        reply.all_users = std::vector<std::string> {};
-        reply.following_users = std::vector<std::string> {};
+
+        if (status.ok()) {
+            reply.all_users = std::vector<std::string> { response.all_users().begin(), response.all_users().end() };
+            reply.following_users = std::vector<std::string> { response.following_users().begin(), response.following_users().end() };
+        } else {
+            reply.comm_status = FAILURE_UNKNOWN;
+        }
     } else if (input.rfind("TIMELINE", 0) == 0) {
         auto timeline = stub_->Timeline(&context);
         auto timeline_message = csce438::Message {};
 
-        while(timeline->Read(&timeline_message)) {
+        while (timeline->Read(&timeline_message)) {
             auto username = timeline_message.username();
             auto message = timeline_message.msg();
             auto timestamp = timeline_message.timestamp();
         }
+    } else {
+        reply.comm_status = FAILURE_NOT_EXISTS;
+        return reply;
     }
 
     reply.grpc_status = status;
-    if (status.ok()) {
-        reply.comm_status = SUCCESS;
-    } else {
-        reply.comm_status = FAILURE_NOT_EXISTS;
-    }
-
     return reply;
 }
 

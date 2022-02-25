@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string>
 #include <unistd.h>
+#include <unordered_map>
+#include <vector>
 
 #include "sns.grpc.pb.h"
 
@@ -28,7 +30,20 @@ using grpc::ServerReaderWriter;
 using grpc::ServerWriter;
 using grpc::Status;
 
+struct User {
+    std::vector<std::string> following;
+    std::vector<std::string> followers;
+};
+
 class SNSServiceImpl final : public SNSService::Service {
+private:
+    std::unordered_map<std::string, User> m_users;
+
+public:
+    SNSServiceImpl()
+        : m_users({})
+    {
+    }
 
     Status List(ServerContext* context, const Request* request, Reply* reply) override
     {
@@ -67,6 +82,13 @@ class SNSServiceImpl final : public SNSService::Service {
         // a new user and verify if the username is available
         // or already taken
         // ------------------------------------------------------------
+        auto username = request->username();
+
+        if (m_users.find(username) != m_users.end())
+            return Status::CANCELLED;
+
+        m_users[username] = User { {}, {} };
+
         return Status::OK;
     }
 
@@ -88,11 +110,20 @@ void RunServer(std::string port_no)
     // which would start the server, make it listen on a particular
     // port number.
     // ------------------------------------------------------------
+    auto address = std::string { "0.0.0.0:" } + port_no;
+    auto service = SNSServiceImpl();
+
+    ServerBuilder builder;
+
+    builder.AddListeningPort(address, grpc::InsecureServerCredentials());
+    builder.RegisterService(&service);
+
+    auto server = builder.BuildAndStart();
+    server->Wait();
 }
 
 int main(int argc, char** argv)
 {
-
     std::string port = "3010";
     int opt = 0;
     while ((opt = getopt(argc, argv, "p:")) != -1) {
