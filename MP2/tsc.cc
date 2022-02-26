@@ -113,15 +113,17 @@ IReply Client::processCommand(std::string& input)
     auto status = grpc::Status {};
     auto request = csce438::Request {};
     auto response = csce438::Reply {};
-    request.set_allocated_username(&username);
+    request.set_username(username);
     reply.comm_status = SUCCESS;
 
     if (input.rfind("FOLLOW", 0) == 0) {
+        request.add_arguments(input.substr(7));
         status = stub_->Follow(&context, request, &response);
 
         if (!status.ok())
             reply.comm_status = FAILURE_INVALID_USERNAME;
     } else if (input.rfind("UNFOLLOW", 0) == 0) {
+        request.add_arguments(input.substr(9));
         status = stub_->UnFollow(&context, request, &response);
 
         if (!status.ok())
@@ -136,14 +138,7 @@ IReply Client::processCommand(std::string& input)
             reply.comm_status = FAILURE_UNKNOWN;
         }
     } else if (input.rfind("TIMELINE", 0) == 0) {
-        auto timeline = stub_->Timeline(&context);
-        auto timeline_message = csce438::Message {};
-
-        while (timeline->Read(&timeline_message)) {
-            auto username = timeline_message.username();
-            auto message = timeline_message.msg();
-            auto timestamp = timeline_message.timestamp();
-        }
+        processTimeline();
     } else {
         reply.comm_status = FAILURE_NOT_EXISTS;
         return reply;
@@ -162,7 +157,15 @@ void Client::processTimeline()
     // for both getting and displaying messages in timeline mode.
     // You should use them as you did in hw1.
     // ------------------------------------------------------------
+    auto context = grpc::ClientContext {};
+    auto timeline = stub_->Timeline(&context);
+    auto timeline_message = csce438::Message {};
 
+    while (timeline->Read(&timeline_message)) {
+        auto username = timeline_message.username();
+        auto message = timeline_message.msg();
+        auto timestamp = timeline_message.timestamp();
+    }
     // ------------------------------------------------------------
     // IMPORTANT NOTICE:
     //

@@ -52,6 +52,17 @@ public:
         // LIST request from the user. Ensure that both the fields
         // all_users & following_users are populated
         // ------------------------------------------------------------
+        auto username = request->username();
+
+        auto users = std::vector<std::string> {};
+        users.reserve(m_users.size());
+
+        for (auto&& user : m_users)
+            reply->add_all_users(user.first);
+
+        for (auto&& follower : m_users[username].followers)
+            reply->add_following_users(follower);
+
         return Status::OK;
     }
 
@@ -62,6 +73,25 @@ public:
         // request from a user to follow one of the existing
         // users
         // ------------------------------------------------------------
+        auto username = request->username();
+
+        if (!request->arguments_size())
+            return Status::CANCELLED;
+
+        auto target_username = request->arguments(0);
+
+        if (m_users.find(target_username) == m_users.end())
+            return Status::CANCELLED;
+
+        auto& user = m_users[username];
+        auto& target = m_users[target_username];
+
+        if (std::find(user.following.begin(), user.following.end(), target_username) != user.following.end())
+            return Status::CANCELLED;
+
+        user.following.push_back(target_username);
+        target.followers.push_back(username);
+
         return Status::OK;
     }
 
@@ -72,6 +102,24 @@ public:
         // request from a user to unfollow one of his/her existing
         // followers
         // ------------------------------------------------------------
+        auto username = request->username();
+        if (!request->arguments_size())
+            return Status::CANCELLED;
+
+        auto target_username = request->arguments(0);
+
+        if (m_users.find(target_username) == m_users.end())
+            return Status::CANCELLED;
+
+        auto& target = m_users[target_username];
+        auto pos = target.followers.end();
+
+        if ((pos = std::find(target.followers.begin(), target.followers.end(), username)) == target.followers.end())
+            return Status::CANCELLED;
+
+        target.followers.erase(pos);
+        m_users[username].following.erase(pos);
+
         return Status::OK;
     }
 
