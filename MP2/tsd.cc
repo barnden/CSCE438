@@ -66,11 +66,15 @@ public:
     void add_timeline_message(csce438::Message message)
     {
         // Presumption is that user mutex is locked already
-        timeline.push_back(message);
+
+        // I feel it would be more natural to push_back then pop_front so that newer
+        // messages are towards the bottom.
+        // Test cases have it in reverse order, i.e. older at bottom.
+        timeline.push_front(message);
 
         // We want to store only the previous 20 timeline messages
         if (timeline.size() > 20)
-            timeline.pop_front();
+            timeline.pop_back();
     }
 
     void send_timeline_message(csce438::Message const& message)
@@ -244,8 +248,6 @@ public:
                 continue;
 
             lock.lock();
-
-            std::cout << timeline_message.msg() << '\n';
 
             auto username = timeline_message.username();
             auto pos = m_users.end();
