@@ -1,9 +1,11 @@
 #include "client.h"
 #include "sns.grpc.pb.h"
+#include <google/protobuf/util/time_util.h>
 #include <grpc++/grpc++.h>
 #include <iostream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <unistd.h>
 
 class Client : public IClient {
@@ -120,14 +122,18 @@ IReply Client::processCommand(std::string& input)
         request.add_arguments(input.substr(7));
         status = stub_->Follow(&context, request, &response);
 
-        if (!status.ok())
-            reply.comm_status = FAILURE_INVALID_USERNAME;
+        if (status.ok())
+            if (response.msg() == "bad name")
+                reply.comm_status = FAILURE_INVALID_USERNAME;
+            else if (response.msg() == "duplicate")
+                reply.comm_status = FAILURE_ALREADY_EXISTS;
     } else if (input.rfind("UNFOLLOW", 0) == 0) {
         request.add_arguments(input.substr(9));
         status = stub_->UnFollow(&context, request, &response);
 
-        if (!status.ok())
-            reply.comm_status = FAILURE_INVALID;
+        if (status.ok())
+            if (response.msg() == "bad name")
+                reply.comm_status = FAILURE_INVALID_USERNAME;
     } else if (input.rfind("LIST", 0) == 0) {
         status = stub_->List(&context, request, &response);
 
@@ -140,7 +146,7 @@ IReply Client::processCommand(std::string& input)
     } else if (input.rfind("TIMELINE", 0) == 0) {
         processTimeline();
     } else {
-        reply.comm_status = FAILURE_NOT_EXISTS;
+        reply.comm_status = FAILURE_INVALID;
         return reply;
     }
 
@@ -150,28 +156,43 @@ IReply Client::processCommand(std::string& input)
 
 void Client::processTimeline()
 {
-    // ------------------------------------------------------------
-    // In this function, you are supposed to get into timeline mode.
-    // You may need to call a service method to communicate with
-    // the server. Use getPostMessage/displayPostMessage functions
-    // for both getting and displaying messages in timeline mode.
-    // You should use them as you did in hw1.
-    // ------------------------------------------------------------
     auto context = grpc::ClientContext {};
     auto timeline = stub_->Timeline(&context);
-    auto timeline_message = csce438::Message {};
 
-    while (timeline->Read(&timeline_message)) {
-        auto username = timeline_message.username();
-        auto message = timeline_message.msg();
-        auto timestamp = timeline_message.timestamp();
+    auto reader = std::thread([&timeline]() -> void {
+        // Separate thread to read new timeline messages
+        auto timeline_message = csce438::Message {};
+
+        while (true) {
+            if (!timeline->Read(&timeline_message))
+                continue;
+
+            auto grpc_timestamp = timeline_message.timestamp();
+            auto timestamp = google::protobuf::util::TimeUtil::TimestampToTimeT(grpc_timestamp);
+
+            displayPostMessage(timeline_message.username(), timeline_message.msg(), timestamp);
+        }
+    });
+    
+    // Main thread handles blocking I/O
+
+    // Setup timeline message
+    auto timeline_message = csce438::Message {};
+    timeline_message.set_username(username);
+
+    // Write initialization message to establish stream in server user object
+    // Server side will assert message is "0xFEE1DEAD"
+    timeline_message.set_msg("0xFEE1DEAD");
+    timeline->Write(timeline_message);
+
+    // Spin up async reader
+    reader.detach();
+    while (true) {
+        // No exit aside from SIGINT per instructions
+        auto message = getPostMessage();
+
+        timeline_message.set_msg(message);
+
+        timeline->Write(timeline_message);
     }
-    // ------------------------------------------------------------
-    // IMPORTANT NOTICE:
-    //
-    // Once a user enter to timeline mode , there is no way
-    // to command mode. You don't have to worry about this situation,
-    // and you can terminate the client program by pressing
-    // CTRL-C (SIGINT)
-    // ------------------------------------------------------------
 }
