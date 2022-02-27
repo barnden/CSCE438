@@ -193,6 +193,12 @@ void Client::processTimeline()
 
         timeline_message.set_msg(message);
 
+        // Set timestamp of message
+        auto now = std::chrono::system_clock::now();
+        auto* timestamp = new google::protobuf::Timestamp {};
+        *timestamp = google::protobuf::util::TimeUtil::TimeTToTimestamp(std::chrono::system_clock::to_time_t(now));
+        timeline_message.set_allocated_timestamp(timestamp);
+
         timeline->Write(timeline_message);
     }
 }
