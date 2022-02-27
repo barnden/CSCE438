@@ -35,8 +35,14 @@ using grpc::Status;
 using lock_t = std::unique_lock<std::mutex>;
 
 class User {
+private:
+    std::ofstream m_file;
+
 public:
+    // These member variables shouldn't be public but I'm too lazy to refactor
+
     std::string username;
+    bool logged_in;
     std::vector<std::string> following;
     std::vector<std::string> followers;
 
@@ -56,6 +62,7 @@ public:
          std::vector<std::string> followers,
          std::deque<csce438::Message> timeline)
         : username(username)
+        , logged_in(false)
         , following(following)
         , followers(followers)
         , timeline(timeline)
@@ -63,9 +70,80 @@ public:
         , mutex({})
         , timeline_mutex({}) {};
 
+    static std::shared_ptr<User> from_file(std::string username)
+    {
+        // Create user object from file
+        auto file = std::ifstream(username + ".usr");
+
+        if (!file.is_open()) {
+            std::cerr << "invalid username " << username << '\n';
+            exit(EXIT_FAILURE);
+        }
+
+        auto following = std::vector<std::string> {};
+        auto followers = std::vector<std::string> {};
+        auto timeline = std::deque<csce438::Message> {};
+
+        auto stage = 1;
+        auto line = std::string {};
+
+        auto handle_timeline_message = [&]() -> void {
+            // Read timeline message from file
+            auto message = csce438::Message {};
+
+            file >> line;
+            message.set_username(line);
+
+            file >> line;
+            message.set_msg(line);
+
+            file >> line;
+            auto timestamp = new google::protobuf::Timestamp();
+            google::protobuf::util::TimeUtil::FromString(line, timestamp);
+            message.set_allocated_timestamp(timestamp);
+
+            timeline.push_back(message);
+        };
+
+        file >> line;
+
+        while (std::getline(file, line)) {
+            // Magic numbers are used to denote which stage we are in
+            if (line == "\x1B\xAD\xFE\xED") {
+                stage = 2;
+                continue;
+            }
+
+            if (line == "\xC0\x01\xD0\x0D") {
+                stage = 3;
+                continue;
+            }
+
+            if (line == "\x12\x04\x57\xBE\xEF") {
+                stage = 4;
+                continue;
+            }
+
+            // Depending on stage, add data
+            switch (stage) {
+            case 2:
+                followers.push_back(line);
+                break;
+            case 3:
+                following.push_back(line);
+                break;
+            case 4:
+                handle_timeline_message();
+                break;
+            }
+        }
+
+        return std::move(std::make_shared<User>(username, following, followers, timeline));
+    }
+
     void add_timeline_message(csce438::Message message)
     {
-        // Presumption is that user mutex is locked already
+        // [IMPORTANT] Presumption is that user mutex is locked already
 
         // I feel it would be more natural to push_back then pop_front so that newer
         // messages are towards the bottom.
@@ -75,6 +153,8 @@ public:
         // We want to store only the previous 20 timeline messages
         if (timeline.size() > 20)
             timeline.pop_back();
+
+        save_user_state();
     }
 
     void send_timeline_message(csce438::Message const& message)
@@ -89,17 +169,58 @@ public:
 
         stream_lock.unlock();
     }
+
+    void save_user_state()
+    {
+        // [IMPORTANT] Presumption is that user mutex is locked already
+
+        // This is terribly inefficent as we open the file on each call, clearing and rewriting entire file.
+
+        // [IMPORTANT] User file is opened with TRUNC on each save.
+        m_file.open(username + ".usr", std::ios::trunc);
+
+        m_file << username << '\n';
+
+        // 0x1BADFEED indicates beginning of followers
+        m_file << "\x1B\xAD\xFE\xED\n";
+        for (auto&& follower : followers)
+            m_file << follower << '\n';
+
+        // 0xC001D00D indicates beginning of following
+        m_file << "\xC0\x01\xD0\x0D\n";
+        for (auto&& followee : following)
+            m_file << followee << '\n';
+
+        // Roastbeef (0x120457BEEF) indicates beginning timeline
+        m_file << "\x12\x04\x57\xBE\xEF\n";
+        for (auto&& message : timeline) {
+            m_file << message.username() << '\n'
+                   << message.msg() // we expect newline at end of msg
+                   << message.timestamp() << '\n';
+        }
+
+        m_file.flush();
+        m_file.close();
+    }
 };
 
 class SNSServiceImpl final : public SNSService::Service {
 private:
     std::unordered_map<std::string, std::shared_ptr<User>> m_users;
     std::mutex m_mutex;
+    std::ofstream m_file;
 
 public:
     SNSServiceImpl()
         : m_users({})
     {
+        m_file = std::ofstream("server.dat", std::ios::app);
+
+        auto file = std::ifstream("server.dat");
+        auto line = std::string {};
+
+        while (file >> line)
+            m_users[line] = User::from_file(line);
     }
 
     Status List(ServerContext* context, const Request* request, Reply* reply) override
@@ -156,6 +277,9 @@ public:
         user->following.push_back(target_username);
         target->followers.push_back(username);
 
+        user->save_user_state();
+        target->save_user_state();
+
         target_lock.unlock();
         user_lock.unlock();
         lock.unlock();
@@ -194,6 +318,7 @@ public:
         }
 
         target->followers.erase(pos);
+        target->save_user_state();
 
         target_lock.unlock();
 
@@ -203,7 +328,8 @@ public:
         auto user_lock = lock_t { user->mutex };
         pos = std::find(user->following.begin(), user->following.end(), target_username);
 
-        m_users[username]->following.erase(pos);
+        user->following.erase(pos);
+        user->save_user_state();
 
         user_lock.unlock();
         lock.unlock();
@@ -218,15 +344,25 @@ public:
 
         if (m_users.find(username) != m_users.end()) {
             // A user with the same username already exists
-            reply->set_msg("duplicate");
-            return Status::OK;
-        }
 
-        // By default a user follows themselves
-        m_users[username] = std::make_shared<User>(username,
-                                                   std::vector<std::string> {},
-                                                   std::vector<std::string> { username },
-                                                   std::deque<csce438::Message> {});
+            if (m_users[username]->logged_in) {
+                // Multiple clients cannot have the same username
+                reply->set_msg("duplicate");
+                return Status::OK;
+            }
+        } else {
+            // By default a user follows themselves
+            m_users[username] = std::make_shared<User>(username,
+                                                       std::vector<std::string> { username },
+                                                       std::vector<std::string> { username },
+                                                       std::deque<csce438::Message> {});
+
+            m_users[username]->save_user_state();
+
+            // Store username in server.dat
+            m_file << username << '\n';
+            m_file.flush();
+        }
 
         lock.unlock();
 
