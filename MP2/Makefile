@@ -33,7 +33,7 @@ tsd: sns.pb.o sns.grpc.pb.o tsd.o
 	$(PROTOC) --cpp_out=. $<
 
 clean:
-	rm -f *.txt *.o *.pb.cc *.pb.h tsc tsd
+	rm -f *.txt *.o *.pb.cc *.pb.h tsc tsd *.usr server.dat
 
 
 # The following is to test your system and ensure a smoother experience.

@@ -5,3 +5,5 @@ sns.*
 !MP2-design.pdf
 tsc
 tsd
+*.usr
+server.dat
