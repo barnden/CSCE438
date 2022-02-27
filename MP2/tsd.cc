@@ -87,24 +87,6 @@ public:
         auto stage = 1;
         auto line = std::string {};
 
-        auto handle_timeline_message = [&]() -> void {
-            // Read timeline message from file
-            auto message = csce438::Message {};
-
-            file >> line;
-            message.set_username(line);
-
-            file >> line;
-            message.set_msg(line);
-
-            file >> line;
-            auto timestamp = new google::protobuf::Timestamp();
-            google::protobuf::util::TimeUtil::FromString(line, timestamp);
-            message.set_allocated_timestamp(timestamp);
-
-            timeline.push_back(message);
-        };
-
         file >> line;
 
         while (std::getline(file, line)) {
@@ -132,9 +114,23 @@ public:
             case 3:
                 following.push_back(line);
                 break;
-            case 4:
-                handle_timeline_message();
+            case 4: {
+                // Read timeline message from file
+                auto message = csce438::Message {};
+
+                message.set_username(line);
+
+                std::getline(file, line);
+                message.set_msg(line);
+
+                std::getline(file, line);
+                auto timestamp = new google::protobuf::Timestamp();
+                google::protobuf::util::TimeUtil::FromString(line, timestamp);
+                message.set_allocated_timestamp(timestamp);
+
+                timeline.push_back(message);
                 break;
+            }
             }
         }
 
