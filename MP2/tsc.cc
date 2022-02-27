@@ -85,29 +85,6 @@ int Client::connectTo()
 
 IReply Client::processCommand(std::string& input)
 {
-    // ------------------------------------------------------------
-    // HINT: How to set the IReply?
-    // Suppose you have "Follow" service method for FOLLOW command,
-    // IReply can be set as follow:
-    //
-    //     // some codes for creating/initializing parameters for
-    //     // service method
-    //     IReply ire;
-    //     grpc::Status status = stub_->Follow(&context, /* some parameters */);
-    //     ire.grpc_status = status;
-    //     if (status.ok()) {
-    //         ire.comm_status = SUCCESS;
-    //     } else {
-    //         ire.comm_status = FAILURE_NOT_EXISTS;
-    //     }
-    //
-    //      return ire;
-    //
-    // IMPORTANT:
-    // For the command "LIST", you should set both "all_users" and
-    // "following_users" member variable of IReply.
-    // ------------------------------------------------------------
-
     auto reply = IReply {};
 
     // Common to all rpc
@@ -173,7 +150,7 @@ void Client::processTimeline()
             displayPostMessage(timeline_message.username(), timeline_message.msg(), timestamp);
         }
     });
-    
+
     // Main thread handles blocking I/O
 
     // Setup timeline message
