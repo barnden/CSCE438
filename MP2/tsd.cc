@@ -42,7 +42,6 @@ public:
     // These member variables shouldn't be public but I'm too lazy to refactor
 
     std::string username;
-    bool logged_in;
     std::vector<std::string> following;
     std::vector<std::string> followers;
 
@@ -51,6 +50,8 @@ public:
 
     // Pointer to bidirectional stream
     grpc::ServerReaderWriter<Message, Message>* timeline_stream;
+    // Pointer to server context of stream
+    ServerContext* timeline_context;
 
     // Mutex for modifying user data
     std::mutex mutex;
@@ -62,11 +63,11 @@ public:
          std::vector<std::string> followers,
          std::deque<csce438::Message> timeline)
         : username(username)
-        , logged_in(false)
         , following(following)
         , followers(followers)
         , timeline(timeline)
         , timeline_stream(nullptr)
+        , timeline_context(nullptr)
         , mutex({})
         , timeline_mutex({}) {};
 
@@ -137,6 +138,14 @@ public:
         return std::move(std::make_shared<User>(username, following, followers, timeline));
     }
 
+    void verify_timeline_stream()
+    {
+        if (timeline_context != nullptr && timeline_context->IsCancelled()) {
+            timeline_context = nullptr;
+            timeline_stream = nullptr;
+        }
+    }
+
     void add_timeline_message(csce438::Message message)
     {
         // [IMPORTANT] Presumption is that user mutex is locked already
@@ -161,7 +170,12 @@ public:
 
         auto stream_lock = lock_t { timeline_mutex };
 
-        timeline_stream->Write(message);
+        if (timeline_context != nullptr && !timeline_context->IsCancelled()) {
+            timeline_stream->Write(message);
+        } else {
+            timeline_stream = nullptr;
+            timeline_context = nullptr;
+        }
 
         stream_lock.unlock();
     }
@@ -338,15 +352,7 @@ public:
         auto username = request->username();
         auto lock = lock_t { m_mutex };
 
-        if (m_users.find(username) != m_users.end()) {
-            // A user with the same username already exists
-
-            if (m_users[username]->logged_in) {
-                // Multiple clients cannot have the same username
-                reply->set_msg("duplicate");
-                return Status::OK;
-            }
-        } else {
+        if (m_users.find(username) == m_users.end()) {
             // By default a user follows themselves
             m_users[username] = std::make_shared<User>(username,
                                                        std::vector<std::string> { username },
@@ -358,6 +364,19 @@ public:
             // Store username in server.dat
             m_file << username << '\n';
             m_file.flush();
+        } else {
+            // According to class announcements, it's undefined behaviour if
+            // two clients are connected with the same username, simultaneously.
+            // In this case, I invalidate the original user's stream/context
+            // so that they may be replaced by the new user should they enter timeline.
+
+            auto const& user = m_users[username];
+            auto user_lock = lock_t { user->mutex };
+
+            user->timeline_stream = nullptr;
+            user->timeline_context = nullptr;
+
+            user_lock.unlock();
         }
 
         lock.unlock();
@@ -367,15 +386,13 @@ public:
 
     __attribute__((flatten)) Status Timeline(ServerContext* context, ServerReaderWriter<Message, Message>* stream) override
     {
-        // ------------------------------------------------------------
-        // In this function, you are to write code that handles
-        // receiving a message/post from a user, recording it in a file
-        // and then making it available on his/her follower's streams
-        // ------------------------------------------------------------
         auto timeline_message = csce438::Message {};
         auto lock = lock_t { m_mutex, std::defer_lock };
 
         while (true) {
+            if (context->IsCancelled())
+                break;
+
             if (!stream->Read(&timeline_message))
                 continue;
 
@@ -392,6 +409,8 @@ public:
             auto const& user = m_users[username];
             auto user_lock = lock_t { user->mutex };
 
+            user->verify_timeline_stream();
+
             if (user->timeline_stream == nullptr) {
                 // Set stream if not already exists
                 if (timeline_message.msg() != "0xFEE1DEAD") {
@@ -399,6 +418,7 @@ public:
                     exit(EXIT_FAILURE);
                 }
 
+                user->timeline_context = context;
                 user->timeline_stream = stream;
 
                 // Send accumulated timeline messages from before user entered timeline mode
@@ -406,8 +426,23 @@ public:
                     user->send_timeline_message(msg);
 
                 user_lock.unlock();
-
                 lock.unlock();
+
+                continue;
+            }
+
+            if (timeline_message.msg() == "0xFEE1DEAD") {
+                /** FIXME: This is a hack.
+                 * The magic string is supposed to be used to set the pointer values for
+                 * context/stream objects, but for some reason we have past that point.
+
+                 * This scenario happens iff there are two active clients logged in as
+                 * the same user and attempting to enter timeline mode.
+                */
+
+                user_lock.unlock();
+                lock.unlock();
+
                 continue;
             }
 
